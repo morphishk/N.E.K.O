@@ -478,41 +478,34 @@ def _is_release_build() -> bool:
 
 
 def _is_steam_sdk_engaged() -> bool:
-    """Steam SDK 是否拿到/缓存过 user id 或 工坊订阅。
+    """Steam SDK 是否拿到 user id 或 工坊订阅。
 
     任一信号为真即认为是 Steam 版：
-    1. 当前进程 Steamworks SDK 实例的 ``Users.GetSteamID()`` 返回非零 —— 真
-       的从 Steam 客户端拿到了登录用户。
+    1. ``Users.GetSteamID()`` 返回非零 —— 真的从 Steam 客户端拿到了登录用户。
     2. ``Workshop.GetNumSubscribedItems()`` 大于 0 —— 用户订阅过工坊内容。
-    3. ``config_dir/workshop_config.json`` 存在 —— 之前任何一次会话写过工坊
-       配置，足以证明这台机器跑过 Steam 版（cloudsave 会把它打包带走，所以
-       即使本次会话 Steam 客户端没开，文件仍在就算）。
 
-    1/2 是实时探测，覆盖正常 Steam session；3 是磁盘兜底，覆盖"上次跑过 Steam
-    本次断网/客户端没开"的场景。
+    只走实时 SDK 信号。曾经考虑过用 ``workshop_config.json`` 作磁盘兜底覆盖
+    "上次跑过 Steam 本次客户端没开"的场景，但该文件由 POST /workshop/config
+    任何用户保存工坊文件夹都会写（包括非 Steam 用户配置本地 mod 路径），
+    不是 Steam 专属信号，会把 release 版误判成 steam。改为：SDK 没动就老老实
+    实归 ``release``，server 侧依赖 preserve-known UPSERT（incoming != 'steam'
+    不会抹掉历史 steam 标签的能力可后续单独加）。
     """
     try:
         from utils.steam_state import get_steamworks
         sw = get_steamworks()
-        if sw is not None:
-            try:
-                if int(sw.Users.GetSteamID() or 0) > 0:
-                    return True
-            except Exception:
-                pass
-            try:
-                if int(sw.Workshop.GetNumSubscribedItems() or 0) > 0:
-                    return True
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    try:
-        from utils.config_manager import get_config_manager
-        cm = get_config_manager()
-        if (cm.config_dir / "workshop_config.json").exists():
-            return True
+        if sw is None:
+            return False
+        try:
+            if int(sw.Users.GetSteamID() or 0) > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            if int(sw.Workshop.GetNumSubscribedItems() or 0) > 0:
+                return True
+        except Exception:
+            pass
     except Exception:
         pass
 
