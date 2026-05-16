@@ -2555,16 +2555,47 @@ class LLMSessionManager:
     # handler 当前固定返回"没有找到相关记忆"，等真实记忆检索接好后只
     # 替换 ``_handle_recall_memory_call`` 即可，不动注册 / 同步链路。
 
+    # Builtin 工具的 metadata.source 常量 —— 与 plugin 走的
+    # ``"plugin:<plugin_id>"`` 形成区分；refresh 时按此 source 判断
+    # 现有同名 entry 是不是自己人，避免抢 plugin 的同名注册。
+    _BUILTIN_TOOL_SOURCE = "builtin"
+
     def _register_builtin_tools(self) -> None:
         """Re-register 内置工具，description / parameter doc 走当前
         ``user_language``。直接调 ``tool_registry.register(replace=True)``
         而不是公共的 ``register_tool``，避免在 __init__ / start_session 等
         热路径里 fire 不必要的 ``_sync_tools_to_active_session``——本方法的
         调用方负责决定要不要 sync。
+
+        ⚠️ "只确保自己加入、不动别人的"：refresh 前先看 registry 里同名
+        entry 的 ``metadata.source``——如果是别的来源（典型：``plugin:<id>``）
+        就 skip + warn，把那个名字让给已经占住它的人。原因：
+
+        - plugin 走完正常 unregister / shutdown 流程（lifecycle_service
+          会调 ``clear_tools(source="plugin:<id>")``）后，registry 里那条
+          entry 自动消失，下一个 refresh 点 builtin 会接管补上。
+        - 反之如果 builtin 无脑 ``replace=True``，就会反复把 plugin 的
+          同名工具顶掉，造成 thrashing —— 一会儿 dispatch 走 plugin
+          callback、一会儿走 builtin handler，模型行为不可预测。
         """
         _lang = normalize_language_code(self.user_language, format='short') or 'en'
+        recall_name = "recall_memory"
+
+        existing = self.tool_registry.get(recall_name)
+        if existing is not None:
+            existing_source = existing.metadata.get("source")
+            if existing_source != self._BUILTIN_TOOL_SOURCE:
+                # 别人占着这个名字（最常见是 plugin），让出去 + 留迹。
+                # 等那一方走正常生命周期 unregister，下次 refresh 自动恢复。
+                logger.warning(
+                    "[builtin tools] skip refresh of %r: name occupied by source=%r; "
+                    "builtin will reclaim after that source releases it.",
+                    recall_name, existing_source,
+                )
+                return
+
         recall_tool = ToolDefinition(
-            name="recall_memory",
+            name=recall_name,
             description=_loc(RECALL_MEMORY_TOOL_DESCRIPTION, _lang),
             parameters={
                 "type": "object",
@@ -2577,7 +2608,7 @@ class LLMSessionManager:
                 "required": ["query"],
             },
             handler=self._handle_recall_memory_call,
-            metadata={"source": "builtin"},
+            metadata={"source": self._BUILTIN_TOOL_SOURCE},
         )
         self.tool_registry.register(recall_tool, replace=True)
 
