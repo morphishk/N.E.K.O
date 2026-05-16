@@ -456,6 +456,12 @@ class OmniOfflineClient:
         
         # State management
         self._is_responding = False
+        # ``_in_tool_call_window`` — True 只在 ``_execute_and_append_openai_tool_calls``
+        # 真的 await handler 那一段；用于让外层 barge-in 调度器（core.py
+        # ``_barge_in_active_text_stream``）"等 tool 结果时不打断"。窗口外的
+        # pre-tool / post-tool LLM stream 都不算 protected，可以被新 user
+        # input cancel 掉。
+        self._in_tool_call_window = False
         self._conversation_history = []
         self._instructions = ""
         self._stream_task = None
@@ -501,6 +507,24 @@ class OmniOfflineClient:
     def has_tools(self) -> bool:
         return bool(self._tool_definitions) and self.on_tool_call is not None
 
+    def cancel_response(self) -> None:
+        """Cooperative cancel：把 ``_is_responding`` 翻 False。
+
+        ``stream_text`` 主循环在每个 chunk 之后都会检查这个 flag（见
+        ``async for chunk in self._astream_with_tools`` 后紧跟的 ``if not
+        self._is_responding: break``），所以下一次 chunk 到来时流就自然
+        退出，``finally`` 块跑完 ``on_response_done`` 把状态清干净。
+
+        外层调用方（``LLMSessionManager._barge_in_active_text_stream``）
+        通常还会配合 ``Task.cancel()`` 把当前 ``await self.llm.astream``
+        立即中断、不用等下一个 chunk；本方法是"协作"那一半，保证即使
+        Task.cancel 在某些边缘场景没立刻生效，流也会在下一拍自然停。
+
+        注意：此方法不动 ``_in_tool_call_window``——保护 tool 执行窗口的
+        责任在调度器侧（等窗口出来再 cancel），这里只负责"让流自停"。
+        """
+        self._is_responding = False
+
     def _openai_tools_payload(self) -> Optional[List[dict]]:
         """OpenAI Chat Completions ``tools`` param — nested under
         ``function``. Returns ``None`` when the caller hasn't enabled
@@ -534,56 +558,66 @@ class OmniOfflineClient:
         calls = [c for c in calls if (getattr(c, "name", "") or "").strip()]
         if not calls:
             return
-        messages.append({
-            "role": "assistant",
-            "content": assistant_text or "",
-            "tool_calls": [
-                {
-                    "id": c.id or f"call_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": c.name,
-                        "arguments": c.arguments or "{}",
-                    },
-                }
-                for i, c in enumerate(calls)
-            ],
-        })
-        for i, c in enumerate(calls):
-            tool_call = ToolCall(
-                name=c.name,
-                arguments=parse_arguments_json(c.arguments),
-                call_id=c.id or f"call_{i}",
-                raw_arguments=c.arguments or "",
-            )
-            handler = self.on_tool_call
-            if handler is None:
-                # No handler — surface a structured error back so the
-                # model can apologize / abort gracefully.
-                result = ToolResult(
-                    call_id=tool_call.call_id, name=tool_call.name,
-                    output={"error": "no on_tool_call handler bound"},
-                    is_error=True, error_message="no on_tool_call handler bound",
+        # ``_in_tool_call_window`` 在真的 await handler 那段窗口内置 True，
+        # 让外层 barge-in 调度器（core.py ``_barge_in_active_text_stream``）
+        # 知道这段时间不能 cancel 本任务——避免 tool 写一半被打断（真实
+        # memory backend 接好之后尤其重要：在写入 / RPC 中途 cancel 会留下
+        # 不一致状态）。窗口外（assistant turn append、tool result append、
+        # 下一轮 astream）都允许 cancel。
+        self._in_tool_call_window = True
+        try:
+            messages.append({
+                "role": "assistant",
+                "content": assistant_text or "",
+                "tool_calls": [
+                    {
+                        "id": c.id or f"call_{i}",
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            "arguments": c.arguments or "{}",
+                        },
+                    }
+                    for i, c in enumerate(calls)
+                ],
+            })
+            for i, c in enumerate(calls):
+                tool_call = ToolCall(
+                    name=c.name,
+                    arguments=parse_arguments_json(c.arguments),
+                    call_id=c.id or f"call_{i}",
+                    raw_arguments=c.arguments or "",
                 )
-            else:
-                try:
-                    result = await handler(tool_call)
-                except Exception as e:
-                    logger.exception("OmniOfflineClient: on_tool_call '%s' raised", c.name)
+                handler = self.on_tool_call
+                if handler is None:
+                    # No handler — surface a structured error back so the
+                    # model can apologize / abort gracefully.
                     result = ToolResult(
                         call_id=tool_call.call_id, name=tool_call.name,
-                        output={"error": f"{type(e).__name__}: {e}"},
-                        is_error=True, error_message=str(e),
+                        output={"error": "no on_tool_call handler bound"},
+                        is_error=True, error_message="no on_tool_call handler bound",
                     )
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.call_id,
-                # 写入 ``name`` 让 Gemini 路径能直接用（FunctionResponse.name
-                # 必须与原 function_call name 完全一致）。OpenAI-compat 不需要
-                # 这个字段也不会因此报错——它只用 tool_call_id 关联。
-                "name": tool_call.name,
-                "content": result.output_as_json_string(),
-            })
+                else:
+                    try:
+                        result = await handler(tool_call)
+                    except Exception as e:
+                        logger.exception("OmniOfflineClient: on_tool_call '%s' raised", c.name)
+                        result = ToolResult(
+                            call_id=tool_call.call_id, name=tool_call.name,
+                            output={"error": f"{type(e).__name__}: {e}"},
+                            is_error=True, error_message=str(e),
+                        )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.call_id,
+                    # 写入 ``name`` 让 Gemini 路径能直接用（FunctionResponse.name
+                    # 必须与原 function_call name 完全一致）。OpenAI-compat 不需要
+                    # 这个字段也不会因此报错——它只用 tool_call_id 关联。
+                    "name": tool_call.name,
+                    "content": result.output_as_json_string(),
+                })
+        finally:
+            self._in_tool_call_window = False
 
     async def _astream_with_tools(self, messages, **overrides):
         """Polymorphic streaming entry point. Yields ``LLMStreamChunk``
@@ -877,28 +911,34 @@ class OmniOfflineClient:
                     "content": streamed_text_buffer,
                     "tool_calls": tool_calls_dict,
                 })
-                for i, (tc_id, tc_name, tc_args, tc_raw) in enumerate(collected_tool_calls):
-                    tool_call = ToolCall(
-                        name=tc_name,
-                        arguments=tc_args,
-                        call_id=tc_id or f"call_{i}",
-                        raw_arguments=tc_raw,
-                    )
-                    try:
-                        result = await self.on_tool_call(tool_call)
-                    except Exception as e:
-                        logger.exception("OmniOfflineClient(genai): on_tool_call '%s' raised", tc_name)
-                        result = ToolResult(
-                            call_id=tool_call.call_id, name=tc_name,
-                            output={"error": f"{type(e).__name__}: {e}"},
-                            is_error=True, error_message=str(e),
+                # 与 _execute_and_append_openai_tool_calls 对偶：标记 tool
+                # 执行窗口期，barge-in 调度器不在此期间 cancel 本任务。
+                self._in_tool_call_window = True
+                try:
+                    for i, (tc_id, tc_name, tc_args, tc_raw) in enumerate(collected_tool_calls):
+                        tool_call = ToolCall(
+                            name=tc_name,
+                            arguments=tc_args,
+                            call_id=tc_id or f"call_{i}",
+                            raw_arguments=tc_raw,
                         )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.call_id,
-                        "name": tc_name,
-                        "content": result.output_as_json_string(),
-                    })
+                        try:
+                            result = await self.on_tool_call(tool_call)
+                        except Exception as e:
+                            logger.exception("OmniOfflineClient(genai): on_tool_call '%s' raised", tc_name)
+                            result = ToolResult(
+                                call_id=tool_call.call_id, name=tc_name,
+                                output={"error": f"{type(e).__name__}: {e}"},
+                                is_error=True, error_message=str(e),
+                            )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.call_id,
+                            "name": tc_name,
+                            "content": result.output_as_json_string(),
+                        })
+                finally:
+                    self._in_tool_call_window = False
                 # Sentinel：与 OpenAI 路径对偶，告诉上游 stream_text 把
                 # final-segment buffer 清掉（pre-tool 文本已被持久化进
                 # assistant turn 的 content 字段）。

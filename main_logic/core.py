@@ -820,6 +820,17 @@ class LLMSessionManager:
         # 同生共死，不会因为两条消息的时序错乱而把 avatar 轮当成 proactive。
         self._pending_turn_meta: Optional[dict] = None
 
+        # ── 文本 barge-in 调度 ────────────────────────────────────────
+        # 当前在跑的 user-text stream_text task；下一条 user input 进来时
+        # 调度器据此决定要不要 cancel。仅用于文本模式（offline）；语音
+        # 模式（realtime）有自己的 barge-in 协议（cancel_response 走 wire
+        # event），不走这条路径。
+        self._active_text_stream_task: Optional[asyncio.Task] = None
+        # 串行化 "等 tool 窗口 → cancel 旧 → 起新" 临界区。否则多条消息
+        # 高并发进来时可能两个调度器同时看到同一个 active task，重复 cancel
+        # 或漏掉最后一条。
+        self._text_stream_dispatch_lock = asyncio.Lock()
+
         # 内置 pseudo 工具（目前只有 recall_memory）。在 __init__ 末尾注册
         # 一份占位，此时 user_language 还可能是 None → 短码兜底回退 'en'；
         # 真正进 session 前会再 refresh 一次，把 description 对齐到当时
@@ -2546,6 +2557,71 @@ class LLMSessionManager:
         global and outlives any single session.
         """
         return await self.tool_registry.execute(call)
+
+    # ------------------------------------------------------------------
+    # 文本模式 barge-in 调度
+    # ------------------------------------------------------------------
+    # 语义（与用户拍板一致）：
+    # - 模型正在 *输出*（pre-tool stream / post-tool stream）→ user msg N
+    #   进来就 cancel 当前 stream_text，立刻开新轮
+    # - 模型正在 *等 tool call 结果*（``_in_tool_call_window=True``）→
+    #   排队等窗口结束再 cancel。保护 tool 执行的原子性（真实 memory
+    #   backend 接好之后尤其重要：写入 / RPC 中途 cancel 会留下不一致状态）
+    #
+    # 仅适用于 OmniOfflineClient（文本模式）。语音模式 barge-in 是
+    # ws 上的 ``response.cancel`` 事件，由 OmniRealtimeClient 自己处理。
+
+    async def _wait_for_offline_tool_window(self, *, timeout: float = 10.0) -> None:
+        """轮询 ``session._in_tool_call_window`` 翻 False；带 timeout 兜底
+        防止 handler 真的卡死时 barge-in 永远进不去。"""
+        sess = self.session
+        if not isinstance(sess, OmniOfflineClient):
+            return
+        deadline = time.time() + timeout
+        while getattr(sess, "_in_tool_call_window", False):
+            if time.time() >= deadline:
+                logger.warning(
+                    "[barge-in] tool call window > %.1fs，强行 cancel；"
+                    "handler 可能卡住或忘记翻 _in_tool_call_window",
+                    timeout,
+                )
+                return
+            await asyncio.sleep(0.05)
+
+    async def _barge_in_active_text_stream(self) -> None:
+        """新 user text 进来时调度：
+        1. 等当前 task 出 tool 窗口
+        2. ``task.cancel()`` + 同时 ``cancel_response()``（双保险）
+        3. ``await task``，吞 CancelledError，让 ``finally`` 跑 on_response_done
+
+        无 active task 时直接 return；本方法可重入但**必须在
+        ``_text_stream_dispatch_lock`` 内调用**。
+        """
+        task = self._active_text_stream_task
+        if task is None or task.done():
+            return
+        await self._wait_for_offline_tool_window()
+        if task.done():
+            # 等窗口的时候它自己跑完了，省事
+            return
+        # 双轨 cancel：Task.cancel() 立即把 await self.llm.astream 打断；
+        # cancel_response() 翻 _is_responding 让循环里的 if not 检查兜底，
+        # 防止某些路径吞掉 CancelledError 后继续跑。
+        sess = self.session
+        if isinstance(sess, OmniOfflineClient):
+            try:
+                sess.cancel_response()
+            except Exception as e:
+                logger.debug("[barge-in] cancel_response raised (ignored): %s", e)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            # 旧 task 在 cancel 后还可能因为各种 cleanup 路径抛非 CancelledError，
+            # 这条 barge-in 不该把异常往上抛——新 msg N 等着开跑呢。
+            logger.debug("[barge-in] cancelled old stream_text raised: %s", e)
 
     # ------------------------------------------------------------------
     # 内置 pseudo 工具：recall_memory
@@ -5858,7 +5934,44 @@ class LLMSessionManager:
                             logger.warning(f"⚠️ Agent callback injection failed: {_cb_err}")
 
                     self._active_text_request_id = message.get("request_id")
-                    await self.session.stream_text(data)
+                    # ── 文本 barge-in 调度 ─────────────────────────────
+                    # 旧实现直接 ``await self.session.stream_text(data)``。
+                    # 并发 msg 进来时两份 stream_text 在同一 OmniOfflineClient
+                    # 上共享 ``_is_responding`` / ``_conversation_history`` /
+                    # ``self.llm``，互相踩脚 → 用户感知 "下一句要等好一会儿
+                    # 才回复" 的根因之一。
+                    #
+                    # 新实现：用 dispatch_lock 串行化 "等 tool 窗口 → cancel
+                    # 旧 task → 创建新 task" 这段，然后在锁外 await 新 task
+                    # （让后来的 msg 还能进 lock cancel 我）。
+                    async with self._text_stream_dispatch_lock:
+                        await self._barge_in_active_text_stream()
+                        text_task = asyncio.create_task(
+                            self.session.stream_text(data),
+                            name=f"stream_text:{self.lanlan_name}",
+                        )
+                        self._active_text_stream_task = text_task
+                    try:
+                        await text_task
+                    except asyncio.CancelledError:
+                        # 我们自己的 task 被后到的 msg N 主动 cancel —— 这是
+                        # barge-in 设计语义里的预期分支，不向上抛。
+                        logger.debug(
+                            "[%s] text stream_text cancelled by newer user input (expected barge-in)",
+                            self.lanlan_name,
+                        )
+                    except Exception as e:
+                        # stream_text 内部已有自己的 retry / status 上报；走到
+                        # 这里是没兜住的异常，记一笔但不重抛——让 websocket
+                        # 路径继续处理下一条消息。
+                        logger.exception(
+                            "[%s] text stream_text raised: %s", self.lanlan_name, e,
+                        )
+                    finally:
+                        # CAS：只有当 active task 还是我自己时才清掉，避免覆盖
+                        # 已经被新 msg N 换上去的 task。
+                        if self._active_text_stream_task is text_task:
+                            self._active_text_stream_task = None
                 else:
                     logger.error(f"💥 Stream: Invalid text data type: {type(data)}")
                 return
