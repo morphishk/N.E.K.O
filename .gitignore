@@ -211,3 +211,7 @@ tests/testbench/docs/dev_note.txt
 
 # 忽略备份目录
 bak/
+
+# 忽略 SSL 证书/私钥（应自行生成或挂载）
+docker/ssl/*.crt
+docker/ssl/*.key
