@@ -13,6 +13,7 @@
     <title data-i18n="app.title">Project N.E.K.O.</title>
     <!-- VRM 光照默认值：从后端注入，保证在所有 JS 之前同步可用 -->
     <script>window.VRM_DEFAULT_LIGHTING=Object.freeze({{ vrm_defaults | tojson }});</script>
+    <script>window.lanlan_config = window.lanlan_config || {}; try { window.lanlan_config.host_mode = JSON.parse('{{ host_mode | safe }}'); } catch(e) { window.lanlan_config.host_mode = { registered: false }; }</script>
     <!-- 诊断观测：必须最早加载——内部 monkey-patch setInterval/setTimeout 计数活跃
          timer，业务代码之后加载就抓不到早期注册的那些。默认关，靠
          localStorage.NEKO_DEBUG_HEALTH=1 + 刷新启用。详见 static/debug-health.js。 -->
@@ -29,6 +30,40 @@
     <link rel="stylesheet" href="/static/css/avatar-reaction-bubble.css?v={{ static_asset_version }}">
     <!-- 暗色模式样式 -->
     <link rel="stylesheet" href="/static/css/dark-mode.css?v={{ static_asset_version }}">
+
+    <!-- [DESIGN-REF: P3-N-5.2.2] N.E.K.O embed 模式 CSS：隐藏非 avatar UI -->
+    <style>
+    body.neko-avatar-embed #chat-container,
+    body.neko-avatar-embed #sidebar,
+    body.neko-avatar-embed #status-toast,
+    body.neko-avatar-embed #subtitle-display,
+    body.neko-avatar-embed #react-chat-window-overlay,
+    body.neko-avatar-embed #react-chat-window-shell,
+    body.neko-avatar-embed #chat-avatar-preview-popup,
+    body.neko-avatar-embed #yui-guide-chat-spotlight,
+    body.neko-avatar-embed .spotlights,
+    /* embed 模式下浮动按钮保持原生行为 */
+    body.neko-avatar-embed {
+      overflow: hidden;
+      background: transparent;
+    }
+    /* 全屏化角色容器 */
+    body.neko-avatar-embed #live2d-container,
+    body.neko-avatar-embed #vrm-container,
+    body.neko-avatar-embed #mmd-container {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      z-index: 1 !important;
+    }
+    body.neko-avatar-embed #live2d-container canvas,
+    body.neko-avatar-embed #vrm-container canvas,
+    body.neko-avatar-embed #mmd-container canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+    </style>
     <!-- 主题管理器（尽早加载以避免闪烁） -->
     <script src="/static/theme-manager.js?v={{ static_asset_version }}"></script>
 
@@ -44,6 +79,31 @@
 </head>
 
 <body class="subtitle-web-host">
+
+    <!-- [DESIGN-REF: P3-N-5.2.1] N.E.K.O embed 模式检测 -->
+    <script>
+    (function() {
+      const params = new URLSearchParams(location.search);
+      if (params.get('mode') === 'avatar') {
+        document.body.classList.add('neko-avatar-embed');
+        // 覆盖 screen 尺寸，使 Live2D PIXI 初始化使用 iframe 尺寸而非主屏幕尺寸
+        // live2d-core.js 用 window.screen.width/height 初始化 canvas，iframe 中 screen 返回主屏分辨率（如 1920x1080），
+        // 导致 canvas 初始化为远大于 iframe  viewport（375x812），角色被压缩/裁切。
+        try {
+          Object.defineProperty(window.screen, 'width', {
+            get() { return window.innerWidth; },
+            configurable: true
+          });
+          Object.defineProperty(window.screen, 'height', {
+            get() { return window.innerHeight; },
+            configurable: true
+          });
+        } catch (e) {
+          console.warn('[N.E.K.O Embed] screen override failed:', e);
+        }
+      }
+    })();
+    </script>
 
     <!-- 旧的按钮面板已迁移到浮动按钮系统（live2d.js），保留隐藏的旧按钮元素供功能触发使用 -->
     <div id="sidebar" style="display: none;">
@@ -458,6 +518,222 @@
     })();
     </script>
     <!-- 注意：初始化由 app.js 统一处理，避免重复初始化 -->
+
+    <!-- [DESIGN-REF: P3-N-5.2.3] N.E.K.O embed 模式 postMessage 监听 + NEKO_READY -->
+    <script>
+    (function() {
+      const params = new URLSearchParams(location.search);
+      if (params.get('mode') !== 'avatar') return;
+
+      window.addEventListener('message', function(e) {
+        // 【调试】记录所有收到的 postMessage
+        if (e.data && typeof e.data === 'object') {
+          console.log('[NEKO postMessage] origin=' + e.origin + ' type=' + (e.data.type || 'N/A'), e.data);
+        }
+        if (!e.data) return;
+        const hostMode = window.lanlan_config?.host_mode;
+
+        // [DESIGN-REF: P3-N2-T-MSG-01] Host Mode 是所有集成特性的唯一门控
+        // 所有 postMessage 命令必须在 registered 检查之后处理
+        if (!hostMode?.registered) return;
+        if (hostMode.origin && e.origin !== hostMode.origin) {
+            console.warn('[N.E.K.O HostMode] postMessage origin mismatch:', e.origin);
+            return;
+        }
+
+        if (e.data.type === 'SET_THEME') {
+          const isLight = e.data.theme === 'light';
+          document.body.classList.toggle('theme-light', isLight);
+          document.body.classList.toggle('theme-dark', !isLight);
+          window.dispatchEvent(new CustomEvent('neko-external-theme-change', {
+            detail: { theme: isLight ? 'light' : 'dark' }
+          }));
+        }
+        if (e.data.type === 'SET_RESIZING') {
+          // [DESIGN-REF: P3-N2-T-MSG-04] 拖拽时暂停/恢复 Live2D 高耗渲染
+          var isResizing = !!e.data.value;
+          if (window.live2dManager && typeof window.live2dManager.setIdle === 'function') {
+            window.live2dManager.setIdle(isResizing);
+          }
+          window.dispatchEvent(new CustomEvent('neko-external-resizing', {
+            detail: { value: isResizing }
+          }));
+        }
+        if (e.data.type === 'SWITCH_MODEL') {
+          var targetType = e.data.modelType;
+          if (targetType && typeof window.handleModelReload === 'function') {
+            window.handleModelReload(null, {
+              temporaryConfig: { model_type: targetType }
+            });
+          }
+        }
+        // [DESIGN-REF: P3-N1-7.3] SWITCH_CHARACTER：切换角色卡
+        if (e.data.type === 'SWITCH_CHARACTER') {
+          var characterName = e.data.characterName;
+          if (characterName && typeof window.handleModelReload === 'function') {
+            window.lanlan_config = window.lanlan_config || {};
+            window.lanlan_config.lanlan_name = characterName;
+            window.handleModelReload(characterName, { suppressToast: true });
+          }
+        }
+        // [DESIGN-REF: P3-N1-7.1] SET_MODE：通知当前形态，调整渲染帧率
+        if (e.data.type === 'SET_MODE') {
+          const mode = e.data.mode;
+          if (mode === 'docked' || mode === 'floating') {
+            window.lanlan_config._iframeMode = mode;
+            if (window.live2dManager && typeof window.live2dManager.setTargetFPS === 'function') {
+              window.live2dManager.setTargetFPS(mode === 'docked' ? 15 : 60);
+            }
+          }
+        }
+
+        // [DESIGN-REF: P3-N2-T-AVATAR-CAPTURE] 响应父窗口截图请求
+        // 使用 N.E.K.O 内置的 avatarPortrait.captureToDataURL()，它会正确处理 WebGL canvas
+        if (e.data.type === 'CAPTURE_AVATAR') {
+          (async function() {
+            try {
+              if (window.avatarPortrait && typeof window.avatarPortrait.captureToDataURL === 'function') {
+                var _dataUrl = await window.avatarPortrait.captureToDataURL({
+                  width: 512,
+                  height: 512,
+                  background: '#2a2d35'
+                });
+                window.parent.postMessage({
+                  type: 'NEKO_CAPTURE_RESULT',
+                  dataUrl: _dataUrl
+                }, hostMode.origin || '*');
+              } else {
+                console.warn('[N.E.K.O] avatarPortrait not ready');
+              }
+            } catch (err) {
+              console.error('[N.E.K.O] Avatar capture failed:', err);
+            }
+          })();
+        }
+
+
+      });
+
+      // embed 模式下：初始化时强制居中一次，模型切换后重新居中
+      // 轮询检测模型加载/变化，加载后延迟 2 秒居中（确保在 applyModelSettings 之后）
+      (function() {
+        let lastCenteredModel = null;
+        let checkTimer = null;
+        let checkAttempts = 0;
+
+        let _nekoReadyAttempts = 0;
+        function sendNekoReady() {
+          // [DESIGN-REF: P3-N2-T-MSG-09] NEKO_READY 双发机制 — 必须检查 hostMode.registered
+          const hostMode = window.lanlan_config?.host_mode;
+          if (!hostMode?.registered) {
+            // 未注册时延迟重试（最多 20 次 / 10 秒），避免 vcp-mate 注册与 iframe 加载竞态
+            if (++_nekoReadyAttempts < 20) {
+              setTimeout(sendNekoReady, 500);
+            }
+            return;
+          }
+          var modelType = (window.lanlan_config && window.lanlan_config.model_type) || 'live2d';
+          var msg = { type: 'NEKO_READY', modelType: modelType };
+          window.parent.postMessage(msg, hostMode.origin || '*');
+        }
+
+        function doCenter() {
+          const mgr = window.live2dManager;
+          if (!mgr || !mgr.currentModel || !mgr.pixi_app) return false;
+          // 同一个模型已经居中过，跳过
+          if (lastCenteredModel === mgr.currentModel) return true;
+
+          const model = mgr.currentModel;
+          const w = mgr.pixi_app.renderer.screen.width;
+          const h = mgr.pixi_app.renderer.screen.height;
+
+          model.anchor.set(0.5, 0.1);
+          model.x = w * 0.5;
+          model.y = h * 0.35;
+
+          requestAnimationFrame(function() {
+            try {
+              const bounds = model.getBounds();
+              if (bounds) {
+                const bottom = bounds.y + bounds.height;
+                if (bottom > h - 10) model.y -= (bottom - (h - 10));
+              }
+            } catch (e) {}
+          });
+
+          lastCenteredModel = model;
+          console.log('[N.E.K.O Embed] 角色已初始化居中:', { x: model.x, y: model.y });
+          // 角色渲染完成并居中后，再次发送 NEKO_READY 作为确认信号
+          sendNekoReady();
+          return true;
+        }
+
+        function startCheckTimer() {
+          checkAttempts = 0;
+          if (checkTimer) clearInterval(checkTimer);
+          checkTimer = setInterval(function() {
+            const mgr = window.live2dManager;
+            // 检测到新模型加载（与上次居中的模型不同）
+            if (mgr && mgr.currentModel && mgr.currentModel !== lastCenteredModel) {
+              clearInterval(checkTimer);
+              checkTimer = null;
+              // 再等 2 秒让 applyModelSettings 完成，然后居中
+              setTimeout(function() {
+                if (doCenter()) {
+                  // 居中成功后，重新启动检测，以便后续模型切换也能触发
+                  setTimeout(startCheckTimer, 1000);
+                } else {
+                  startCheckTimer();
+                }
+              }, 2000);
+              return;
+            }
+            if (++checkAttempts > 60) {
+              clearInterval(checkTimer);
+              checkTimer = null;
+            }
+          }, 1000);
+        }
+
+        // iframe 卸载时清理轮询，避免内存泄漏
+        window.addEventListener('beforeunload', function() {
+          if (checkTimer) clearInterval(checkTimer);
+        });
+
+        startCheckTimer();
+      })();
+
+      // 就绪通知：DOM 就绪后发送早期信号，角色渲染完成后再发送确认信号
+      let _readyEarlyAttempts = 0;
+      function sendReadyEarly() {
+        // [DESIGN-REF: P3-N2-T-MSG-09] NEKO_READY 双发机制 — 必须检查 hostMode.registered
+        const hostMode = window.lanlan_config?.host_mode;
+        if (!hostMode?.registered) {
+          // 未注册时延迟重试（最多 20 次 / 10 秒），避免 vcp-mate 注册与 iframe 加载竞态
+          if (++_readyEarlyAttempts < 20) {
+            setTimeout(sendReadyEarly, 500);
+          }
+          return;
+        }
+        var modelType = (window.lanlan_config && window.lanlan_config.model_type) || 'live2d';
+        var msg = { type: 'NEKO_READY', modelType: modelType };
+        window.parent.postMessage(msg, hostMode.origin || '*');
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', sendReadyEarly);
+      } else {
+        sendReadyEarly();
+      }
+
+      // 触发一次 resize，确保 PIXI canvas 尺寸与 iframe viewport 对齐
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 500);
+      });
+
+    })();
+    </script>
 </body>
 
 </html>

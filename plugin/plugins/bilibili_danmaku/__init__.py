@@ -741,11 +741,18 @@ class BiliDanmakuPlugin(NekoPluginBase):
             def on_text_delta(text: str, is_first: bool):
                 reply_chunks.append(text)
 
+            # [DESIGN-REF: P3-N2-T-PROTO-04] Host Mode 条件注入 X-Neko-Character Header
+            _default_headers = {}
+            from app.integration_state import integration_state
+            if integration_state.registered:
+                _default_headers['X-Neko-Character'] = self._target_lanlan
+
             session = OmniOfflineClient(
                 base_url=conversation_config.get('base_url', ''),
                 api_key=conversation_config.get('api_key', ''),
                 model=conversation_config.get('model', ''),
                 on_text_delta=on_text_delta,
+                default_headers=_default_headers,
             )
             instructions = await self._build_bili_trusted_write_instructions(
                 action_name=action_name,

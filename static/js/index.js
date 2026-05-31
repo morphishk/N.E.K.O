@@ -3,10 +3,17 @@
  * 负责初始化主页相关功能，包括页面配置加载、VRM 路径缓存等
  */
 // 页面配置 - 从 URL 或 API 获取
-let lanlan_config = {
+// [DESIGN-REF: P3-N2-T-HOST-09] 保留模板注入的 host_mode，避免覆盖
+let lanlan_config = Object.assign({}, window.lanlan_config, {
     lanlan_name: ""
-};
+});
 window.lanlan_config = lanlan_config;
+// [DESIGN-REF: P3-N2-T-HOST-09] 辅助函数：保存并恢复 host_mode，防止后续赋值覆盖模板注入值
+function _preserveHostMode(fn) {
+    var _hm = window.lanlan_config && window.lanlan_config.host_mode;
+    fn();
+    if (_hm && window.lanlan_config) window.lanlan_config.host_mode = _hm;
+}
 let cubism4Model = "";
 let vrmModel = "";
 

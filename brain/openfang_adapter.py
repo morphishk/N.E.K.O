@@ -238,7 +238,8 @@ class OpenFangAdapter:
         """
         import hashlib
         cm = get_config_manager()
-        agent_cfg = cm.get_model_api_config('agent')
+        _char_name = cm.get_character_data()[1] or ''
+        agent_cfg = cm.get_model_api_config('agent', character_name=_char_name)
         key_fields = f"{agent_cfg.get('model', '')}|{agent_cfg.get('base_url', '')}|{agent_cfg.get('api_key', '')}"
         return hashlib.md5(key_fields.encode()).hexdigest()
 
@@ -566,7 +567,8 @@ class OpenFangAdapter:
         3. 写 ~/.openfang/config.toml           — 设置 [default_model] + [provider_urls]
         """
         cm = get_config_manager()
-        agent_cfg = cm.get_model_api_config('agent')
+        _char_name = cm.get_character_data()[1] or ''
+        agent_cfg = cm.get_model_api_config('agent', character_name=_char_name)
 
         api_key = (agent_cfg.get("api_key") or "").strip()
         base_url = (agent_cfg.get("base_url") or "").strip()
@@ -848,7 +850,8 @@ class OpenFangAdapter:
 
         # 从 NEKO agent config 取 model 名称
         cm = get_config_manager()
-        neko_agent_cfg = cm.get_model_api_config('agent')
+        _char_name = cm.get_character_data()[1] or ''
+        neko_agent_cfg = cm.get_model_api_config('agent', character_name=_char_name)
         model_name = (agent_config.get("model") or neko_agent_cfg.get("model") or "").strip()
         if not model_name:
             logger.warning("[OpenFang] No model configured, cannot push agent manifest")

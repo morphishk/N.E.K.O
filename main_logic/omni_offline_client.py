@@ -530,6 +530,7 @@ class OmniOfflineClient:
         tool_definitions: Optional[List[ToolDefinition]] = None,
         max_tool_iterations: int = 6,
         enable_long_response_summary: bool = False,
+        default_headers: Optional[Dict[str, str]] = None,
     ):
         # Use base_url directly without conversion
         self.base_url = base_url
@@ -545,6 +546,12 @@ class OmniOfflineClient:
         self.handle_connection_error = on_connection_error
         self.on_status_message = on_status_message
         self.on_response_done = on_response_done
+        self.default_headers = dict(default_headers) if default_headers else {}
+        # [DESIGN-REF: P3-N2-T-PROTO-03] 集中注入 X-Neko-Character Header
+        if self.lanlan_name:
+            from app.integration_state import integration_state
+            if integration_state.registered:
+                self.default_headers.setdefault('X-Neko-Character', self.lanlan_name)
         self.on_proactive_done: Optional[Callable[[bool], Awaitable[None]]] = None
         self.on_repetition_detected = on_repetition_detected
         self.on_response_discarded = on_response_discarded
@@ -583,10 +590,12 @@ class OmniOfflineClient:
         # 把 3000 烤进 client 会让没有长度 guard 的 proactive 轮次也能吐到 3000
         # token。summary 的 budget 抬升改成 stream_text 内临时 bump + finally
         # 还原（见 stream_text 顶部），把 3000 严格限定在长回复流式路径里。
+        # [DESIGN-REF: P3-N2-T-PROTO-03] 集中注入 default_headers
         self.llm = create_chat_llm(
             self.model, self.base_url, self.api_key,
             streaming=True, max_retries=0,
             max_completion_tokens=_budget_to_max_tokens(self.max_response_length),
+            default_headers=self.default_headers,
         )
 
         # ── Tool calling state ────────────────────────────────────────
@@ -1242,6 +1251,7 @@ class OmniOfflineClient:
                 streaming=True, max_retries=0,
                 # 普通 budget；summary 的 3000 抬升只在 stream_text 内临时生效。
                 max_completion_tokens=_budget_to_max_tokens(self.max_response_length),
+                default_headers=self.default_headers,
             )
             old_llm = self.llm
             self.llm = new_llm
@@ -1337,13 +1347,18 @@ class OmniOfflineClient:
         if not (tail and tail.strip()):
             return None
 
+        # [DESIGN-REF: SUP-CROSS-01] 已知行为：_summarize_tail_for_tts() 使用 emotion
+        # 配置而非 summary 配置。vcp-mate 侧 emotion 绑定 Agent 的 system_prompt
+        # 需具备通用文本处理能力（情绪分析 + 摘要）。
         # emotion 配置在 config/api_providers.json 每个 provider 下都有
         # `emotion_model` 字段；config_manager 拿到的就是当前 provider 的
         # emotion 子配置（model/base_url/api_key）。
         try:
             from utils.config_manager import get_config_manager  # 延迟 import 防循环
             cfg_mgr = get_config_manager()
-            emotion_config = cfg_mgr.get_model_api_config('emotion') if cfg_mgr else None
+            # [DESIGN-REF: SUP-CROSS-01] emotion 配置用于 summary 任务（历史代码）
+            _char_name = cfg_mgr.get_character_data()[1] or ''
+            emotion_config = cfg_mgr.get_model_api_config('emotion', character_name=_char_name) if cfg_mgr else None
         except Exception as e:
             logger.warning("summary: 取 emotion 配置失败: %s", e)
             return None
@@ -1394,6 +1409,7 @@ class OmniOfflineClient:
             llm = create_chat_llm(
                 emotion_model, emotion_base_url, emotion_api_key,
                 max_completion_tokens=120,
+                default_headers=self.default_headers,
             )
         except Exception as e:
             logger.warning("summary: 构造 emotion LLM 失败: %s", e)

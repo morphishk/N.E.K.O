@@ -449,6 +449,19 @@ class Live2DManager {
     }
 
     /**
+     * 设置空闲状态（暂停/恢复渲染）
+     * [DESIGN-REF: P3-N2-T-MSG-04] SET_RESIZING 协议使用 setIdle 控制渲染
+     * @param {boolean} idle - true 暂停渲染，false 恢复渲染
+     */
+    setIdle(idle) {
+        if (idle) {
+            this.pauseRendering();
+        } else {
+            this.resumeRendering();
+        }
+    }
+
+    /**
      * 设置目标帧率
      * @param {number} fps - 目标帧率，0 表示不限帧（跟随 VSync）
      */

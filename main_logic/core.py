@@ -4140,8 +4140,9 @@ class LLMSessionManager:
                 # later mutations.
                 _initial_tool_defs = self.tool_registry.all()
                 if input_mode == 'text':
-                    conversation_config = self._config_manager.get_model_api_config('conversation')
-                    vision_config = self._config_manager.get_model_api_config('vision')
+                    conversation_config = self._config_manager.get_model_api_config('conversation', character_name=self.lanlan_name)
+                    vision_config = self._config_manager.get_model_api_config('vision', character_name=self.lanlan_name)
+                    # [DESIGN-REF: P3-N2-T-PROTO-03] X-Neko-Character 由 OmniOfflineClient.__init__() 集中注入
                     new_session = OmniOfflineClient(
                         base_url=conversation_config['base_url'],
                         api_key=conversation_config['api_key'],
@@ -4604,9 +4605,10 @@ class LLMSessionManager:
             _pending_tool_defs = self.tool_registry.all()
             if self.input_mode == 'text':
                 # 文本模式：使用 OmniOfflineClient
-                conversation_config = self._config_manager.get_model_api_config('conversation')
-                vision_config = self._config_manager.get_model_api_config('vision')
+                conversation_config = self._config_manager.get_model_api_config('conversation', character_name=self.lanlan_name)
+                vision_config = self._config_manager.get_model_api_config('vision', character_name=self.lanlan_name)
                 guard_max_length = self._get_text_guard_max_length()
+                # [DESIGN-REF: P3-N2-T-PROTO-03] X-Neko-Character 由 OmniOfflineClient.__init__() 集中注入
                 self.pending_session = OmniOfflineClient(
                     base_url=conversation_config['base_url'],
                     api_key=conversation_config['api_key'],

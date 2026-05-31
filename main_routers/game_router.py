@@ -3517,6 +3517,12 @@ async def _build_and_register_game_session(
 
     set_call_type("game_chat")
 
+    # [DESIGN-REF: P3-N2-T-PROTO-04] Host Mode 条件注入 X-Neko-Character Header
+    _default_headers = {}
+    from app.integration_state import integration_state
+    if integration_state.registered:
+        _default_headers['X-Neko-Character'] = lanlan_name
+
     session = OmniOfflineClient(
         base_url=char_info['base_url'],
         api_key=char_info['api_key'],
@@ -3525,6 +3531,7 @@ async def _build_and_register_game_session(
         max_response_length=100,  # 游戏台词要短
         lanlan_name=char_info['lanlan_name'],
         master_name=char_info['master_name'],
+        default_headers=_default_headers,
     )
 
     if postgame_snapshot is not None:

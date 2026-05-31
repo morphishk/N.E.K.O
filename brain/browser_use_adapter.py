@@ -495,7 +495,8 @@ class BrowserUseAdapter:
         return self._browser_session
 
     def _current_api_signature(self) -> str:
-        api_cfg = self._config_manager.get_model_api_config("agent")
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        api_cfg = self._config_manager.get_model_api_config("agent", character_name=_char_name)
         model = api_cfg.get("model", "") or ""
         base_url = api_cfg.get("base_url", "") or ""
         return f"{base_url}|{model}"
@@ -589,7 +590,8 @@ class BrowserUseAdapter:
         internal copy / re-init performed by browser-use.
         """
         from browser_use.llm import ChatOpenAI as BUChatOpenAI
-        api_cfg = self._config_manager.get_model_api_config("agent")
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        api_cfg = self._config_manager.get_model_api_config("agent", character_name=_char_name)
         base_url = api_cfg.get("base_url", "") or ""
         model = api_cfg.get("model", "") or ""
         is_gemini = self._is_gemini_compatible_endpoint(base_url)

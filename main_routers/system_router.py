@@ -2546,7 +2546,7 @@ async def _deliver_break_reminder_via_llm(
     # next attempt once config is fixed.
     config_manager = get_config_manager()
     try:
-        correction_config = config_manager.get_model_api_config('correction')
+        correction_config = config_manager.get_model_api_config('correction', character_name=lanlan_name)
         correction_model = correction_config.get('model')
         correction_base_url = correction_config.get('base_url')
         correction_api_key = correction_config.get('api_key')
@@ -2593,6 +2593,12 @@ async def _deliver_break_reminder_via_llm(
     pass_probe = ''
     _PASS_PROBE_LEN = 5  # len("[PASS]") - 1
 
+    # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+    _default_headers = {}
+    from app.integration_state import integration_state
+    if integration_state.registered and lanlan_name:
+        _default_headers['X-Neko-Character'] = lanlan_name
+
     try:
         async with asyncio.timeout(timeout_seconds):
             async with create_chat_llm(
@@ -2600,6 +2606,7 @@ async def _deliver_break_reminder_via_llm(
                 temperature=1.0,
                 max_completion_tokens=PROACTIVE_PHASE2_GENERATE_MAX_TOKENS,
                 streaming=True,
+                default_headers=_default_headers,
             ) as llm:
                 async for chunk in llm.astream(messages):
                     if mgr.state.is_proactive_preempted(proactive_sid):
@@ -3111,7 +3118,7 @@ async def emotion_analysis(request: Request):
         model = data.get('model')
         
         # 使用参数或默认配置，使用 .get() 安全获取避免 KeyError
-        emotion_config = _config_manager.get_model_api_config('emotion')
+        emotion_config = _config_manager.get_model_api_config('emotion', character_name=lanlan_name)
         emotion_api_key = emotion_config.get('api_key')
         emotion_model = emotion_config.get('model')
         emotion_base_url = emotion_config.get('base_url')
@@ -3143,6 +3150,12 @@ async def emotion_analysis(request: Request):
         from utils.token_tracker import set_call_type
         set_call_type("emotion")
 
+        # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+        _default_headers = {}
+        from app.integration_state import integration_state
+        if integration_state.registered and lanlan_name:
+            _default_headers['X-Neko-Character'] = lanlan_name
+
         # 异步调用模型（使用统一工厂，自动处理 extra_body / provider 兼容）
         llm = create_chat_llm(
             model,
@@ -3151,6 +3164,7 @@ async def emotion_analysis(request: Request):
             temperature=0.3,
             # Gemini 模型可能返回 markdown 格式，需要更多 token
             max_completion_tokens=EMOTION_ANALYSIS_MAX_TOKENS,
+            default_headers=_default_headers,
         )
         async with llm:
             result = await llm.ainvoke(messages)
@@ -3288,7 +3302,8 @@ async def set_achievement_status(name: str):
             logger.error(f"设置成就失败: {e}")
             return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
     else:
-        return JSONResponse(content={"success": False, "error": "Steamworks未初始化"}, status_code=503)
+        # Steamworks 未初始化时静默返回成功，避免非 Steam 环境下前端控制台持续报错
+        return JSONResponse(content={"success": True, "totalPlayTime": 0, "added": 0, "warning": "Steamworks not available"})
 
 
 @router.post('/steam/update-playtime')
@@ -3370,7 +3385,8 @@ async def update_playtime(request: Request):
             logger.error(f"更新游戏时长失败: {e}")
             return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
     else:
-        return JSONResponse(content={"success": False, "error": "Steamworks未初始化"}, status_code=503)
+        # Steamworks 未初始化时静默返回成功，避免非 Steam 环境下前端控制台持续报错
+        return JSONResponse(content={"success": True, "totalPlayTime": 0, "added": 0, "warning": "Steamworks not available"})
 
 
 @router.get('/steam/list-achievements')
@@ -5449,6 +5465,12 @@ async def proactive_chat(request: Request):
                 "detail": str(e)
             }, status_code=500))
 
+        # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+        _default_headers = {}
+        from app.integration_state import integration_state
+        if integration_state.registered and lanlan_name:
+            _default_headers['X-Neko-Character'] = lanlan_name
+
         def _make_llm(temperature: float = 1.0,
                       max_completion_tokens: int = PROACTIVE_PHASE2_GENERATE_MAX_TOKENS,
                       use_vision: bool = False, disable_thinking: bool = True):
@@ -5463,6 +5485,7 @@ async def proactive_chat(request: Request):
                 temperature=temperature,
                 max_completion_tokens=max_completion_tokens,
                 streaming=True,
+                default_headers=_default_headers,
             )
             if not disable_thinking:
                 kw["extra_body"] = None  # skip auto-resolved extra_body

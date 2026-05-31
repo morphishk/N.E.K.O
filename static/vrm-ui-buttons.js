@@ -29,8 +29,11 @@ VRMManager.prototype.setupFloatingButtons = function() {
     // 防御性检查：当前模型类型不是 VRM 时不创建按钮（防止过时的异步回调）
     var cfgType = (window.lanlan_config && window.lanlan_config.model_type || '').toLowerCase();
     var cfgSub = (window.lanlan_config && window.lanlan_config.live3d_sub_type || '').toLowerCase();
-    var isVrm = cfgType === 'vrm' || (cfgType === 'live3d' && cfgSub === 'vrm');
-    if (cfgType && !isVrm) return;
+    // 【修复】兼容 model_type 为 live3d 或 vrm 的情况；同时如果实际已加载 VRM 模型也创建按钮
+    var isVrm = cfgType === 'vrm' || cfgType === 'live3d' || (cfgType === 'live3d' && cfgSub === 'vrm') || !!window.vrmModel;
+    if (cfgType && cfgType !== 'live2d' && !isVrm) return;
+    // 如果配置为 live2d 但实际有 VRM 模型，仍然创建按钮（兜底兼容）
+    if (cfgType === 'live2d' && !window.vrmModel) return;
 
     // 基础框架初始化
     const buttonsContainer = this.setupFloatingButtonsBase();
@@ -58,7 +61,6 @@ VRMManager.prototype.setupFloatingButtons = function() {
             buttonsContainer.style.right = '16px';
             buttonsContainer.style.left = '';
             buttonsContainer.style.top = '';
-            buttonsContainer.style.display = 'flex';
         } else {
             buttonsContainer.style.flexDirection = 'column';
             buttonsContainer.style.bottom = '';
@@ -66,6 +68,8 @@ VRMManager.prototype.setupFloatingButtons = function() {
             buttonsContainer.style.left = '';
             buttonsContainer.style.top = '';
         }
+        // 【修复】桌面端和移动端都需要显示按钮
+        buttonsContainer.style.display = 'flex';
     };
     applyResponsiveFloatingLayout();
 

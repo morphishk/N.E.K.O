@@ -410,6 +410,25 @@
             var data;
             if (temporaryConfig) {
                 data = Object.assign({ success: true }, temporaryConfig);
+                // [P3-N-FIX] temporaryConfig 通常只包含 model_type，缺少 model_path。
+                // 只有 live2d 没有默认模型路径，需要从 API 补充。
+                // VRM 有默认路径，MMD 也有独立加载逻辑，不能拿 live2d 的 model_path 污染它们。
+                var _tempModelType = (data.model_type || 'live2d').toLowerCase();
+                if (!data.model_path && _tempModelType === 'live2d') {
+                    try {
+                        var _pageConfigUrl = nameForConfig
+                            ? '/api/config/page_config?lanlan_name=' + encodeURIComponent(nameForConfig)
+                            : '/api/config/page_config';
+                        var _response = await fetch(_pageConfigUrl);
+                        var _apiData = await _response.json();
+                        if (_apiData.success && _apiData.model_path) {
+                            data.model_path = _apiData.model_path;
+                            console.log('[Model] 已从 API 补充 model_path:', data.model_path);
+                        }
+                    } catch (e) {
+                        console.warn('[Model] 尝试补充 model_path 失败:', e);
+                    }
+                }
             } else {
                 var pageConfigUrl = nameForConfig
                     ? '/api/config/page_config?lanlan_name=' + encodeURIComponent(nameForConfig)
@@ -422,6 +441,12 @@
                 var newModelPath = data.model_path || '';
                 var newModelType = (data.model_type || 'live2d').toLowerCase();
                 var live3dSubType = (data.live3d_sub_type || '').toLowerCase();
+
+                // [P3-N-FIX] vcp-mate 发送的 model_type 为 'mmd'，映射为 N.E.K.O 内部的 'live3d' + 'mmd'
+                if (newModelType === 'mmd') {
+                    newModelType = 'live3d';
+                    live3dSubType = 'mmd';
+                }
                 var oldModelType = window.lanlan_config?.model_type || 'live2d';
                 var nextLighting = (temporaryConfig && !Object.prototype.hasOwnProperty.call(data, 'lighting'))
                     ? (window.lanlan_config?.lighting || null)

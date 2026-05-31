@@ -3498,10 +3498,10 @@ class ConfigManager:
 
         return config
 
-    def get_model_api_config(self, model_type: str) -> dict:
+    def get_model_api_config(self, model_type: str, character_name: str = None) -> dict:
         """
         获取指定模型类型的 API 配置（自动处理自定义 API 优先级）
-        
+
         Args:
             model_type: 模型类型，可选值：
                 - 'summary': 摘要模型（回退到辅助API）
@@ -3511,7 +3511,8 @@ class ConfigManager:
                 - 'realtime': 实时语音模型（回退到核心API）
                 - 'tts_default': 默认TTS（回退到核心API，用于OmniOfflineClient）
                 - 'tts_custom': 自定义TTS（回退到辅助API，用于voice_id场景）
-                
+            character_name: 当前角色名，用于 Host Mode 自动代理时替换 {character} 占位符
+
         Returns:
             dict: 包含以下字段的配置：
                 - 'model': 模型名称
@@ -3519,6 +3520,27 @@ class ConfigManager:
                 - 'base_url': API端点URL
                 - 'is_custom': 是否使用自定义API配置
         """
+        # ── [DESIGN-REF: SUP-HOST-08~12] Host Mode 自动代理（优先级最高）──
+        from app.integration_state import integration_state
+        if (
+            integration_state.registered
+            and integration_state.host_app
+            and model_type in integration_state.config.get('assist_types', [])
+        ):
+            proxy_base_url = integration_state.config.get('aux_proxy_base_url', '')
+            if proxy_base_url:
+                base_url = f"{proxy_base_url}/{model_type}"
+                # 集中替换 {character} 占位符，避免 6 个调用点重复逻辑
+                if character_name and '{character}' in base_url:
+                    base_url = base_url.replace('{character}', character_name)
+                return {
+                    'model': 'hostmode-proxy',
+                    'api_key': integration_state.config.get('aux_proxy_api_key', 'dummy'),
+                    'base_url': base_url,
+                    'is_custom': True,
+                    'api_type': None,
+                }
+
         core_config = self.get_core_config()
         enable_custom_api = core_config.get('ENABLE_CUSTOM_API', False)
 

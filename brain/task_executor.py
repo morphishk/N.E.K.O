@@ -387,12 +387,16 @@ class DirectTaskExecutor:
         tiers are closed and recreated, so callers don't need to flush per-tier.
         """
         set_call_type("agent")
-        api_config = self._config_manager.get_model_api_config(tier)
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        api_config = self._config_manager.get_model_api_config(tier, character_name=_char_name)
+        # [DESIGN-REF: SUP-CROSS-02] 已知行为：task_executor 的 cross-tier flush
+        # key 使用 summary 配置（历史代码）。vcp-mate 侧 summary 绑定 Agent 的
+        # system_prompt 需具备通用文本处理能力（兼容观察/任务执行场景）。
         # The cross-tier flush key tracks the summary tier's provider config
         # (current behavior). Switching providers via the UI typically happens
         # for the summary tier and the others share the same upstream; keying
         # off summary keeps the original semantics.
-        watch_config = self._config_manager.get_model_api_config("summary")
+        watch_config = self._config_manager.get_model_api_config("summary", character_name=_char_name)
         watch_key = (watch_config['api_key'], watch_config['base_url'], watch_config['model'])
         if self._cached_llm_config_key != watch_key:
             self._close_all_llms()
@@ -403,6 +407,12 @@ class DirectTaskExecutor:
             temperature, max_completion_tokens,
         )
         if instance_key not in self._cached_llms:
+            # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+            _default_headers = {}
+            from app.integration_state import integration_state
+            if integration_state.registered and _char_name:
+                _default_headers['X-Neko-Character'] = _char_name
+
             llm = create_chat_llm(
                 model=api_config['model'],
                 base_url=api_config['base_url'],
@@ -410,6 +420,7 @@ class DirectTaskExecutor:
                 temperature=temperature,
                 max_completion_tokens=max_completion_tokens,
                 max_retries=0,
+                default_headers=_default_headers,
             )
             self._cached_llms[instance_key] = llm
             logger.debug(

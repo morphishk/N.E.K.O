@@ -570,7 +570,8 @@ class ComputerUseAdapter:
         self._llm_client: Optional[ChatOpenAI] = None
         self._llm_client_sig: Optional[tuple] = None
         self._config_manager = get_config_manager()
-        self._agent_model_cfg = self._config_manager.get_model_api_config("agent")
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        self._agent_model_cfg = self._config_manager.get_model_api_config("agent", character_name=_char_name)
 
         self._history_template = (
             HISTORY_TEMPLATE_THINKING
@@ -603,6 +604,13 @@ class ComputerUseAdapter:
                 self.last_error = "Agent model not configured"
                 return
 
+            # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+            _default_headers = {}
+            from app.integration_state import integration_state
+            _char_name = self._config_manager.get_character_data()[1] or ''
+            if integration_state.registered and _char_name:
+                _default_headers['X-Neko-Character'] = _char_name
+
             self._llm_client = create_chat_llm(
                 model=model,
                 base_url=base_url,
@@ -610,6 +618,7 @@ class ComputerUseAdapter:
                 timeout=65.0,
                 max_retries=0,
                 temperature=0,
+                default_headers=_default_headers,
             )
         except Exception as e:
             self.last_error = str(e)
@@ -648,7 +657,8 @@ class ComputerUseAdapter:
         ``_RESTORE_PING_INTERVAL_S=7s`` gap used by the restore loop, so
         attempts don't overlap.
         """
-        cfg = self._config_manager.get_model_api_config("agent")
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        cfg = self._config_manager.get_model_api_config("agent", character_name=_char_name)
         api_key = cfg.get("api_key") or "EMPTY"
         base_url = cfg.get("base_url", "")
         model = cfg.get("model", "")
@@ -673,6 +683,13 @@ class ComputerUseAdapter:
                     # purely by the per-call ``timeout=timeout_s`` argument
                     # on the ping's ``invoke_raw`` below, which routes
                     # through ``_params()`` without mutating the instance.
+                    # [DESIGN-REF: P3-N2-T-PROTO-03] 注入 X-Neko-Character Header
+                    _default_headers = {}
+                    from app.integration_state import integration_state
+                    _char_name = self._config_manager.get_character_data()[1] or ''
+                    if integration_state.registered and _char_name:
+                        _default_headers['X-Neko-Character'] = _char_name
+
                     self._llm_client = create_chat_llm(
                         model=model,
                         base_url=base_url,
@@ -680,6 +697,7 @@ class ComputerUseAdapter:
                         timeout=65.0,
                         max_retries=0,
                         temperature=0,
+                        default_headers=_default_headers,
                     )
                     self._llm_client_sig = current_sig
                 extra = get_agent_extra_body(model) or {}
@@ -728,7 +746,8 @@ class ComputerUseAdapter:
     # ------------------------------------------------------------------
 
     def is_available(self) -> Dict[str, Any]:
-        model_cfg = self._config_manager.get_model_api_config("agent")
+        _char_name = self._config_manager.get_character_data()[1] or ''
+        model_cfg = self._config_manager.get_model_api_config("agent", character_name=_char_name)
         ok = True
         reasons: List[str] = []
         if not model_cfg.get("base_url") or not model_cfg.get("model"):

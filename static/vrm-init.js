@@ -511,14 +511,25 @@ async function initVRMModel() {
                 targetModelPath.trim() === ''
             ))) {
             // 获取当前是否应该处于 VRM 模式
-            const isVRMMode = window.lanlan_config && window.lanlan_config.model_type === 'vrm';
+            const cfgType = (window.lanlan_config && window.lanlan_config.model_type || '').toLowerCase();
+            const isVRMMode = cfgType === 'vrm' || cfgType === 'live3d';
 
-            // 只有在 "存在 Live2D 对象" 且 "当前配置不是 VRM 模式" 时，才真的退出
-            if (window.cubism4Model && !isVRMMode) {
-                return; // Live2D 模式且未强制切换，跳过 VRM 默认加载
+            // 【修复】如果当前配置不是 VRM/Live3D 模式，但有 Live2D 模型则不应加载 VRM
+            if (!isVRMMode && window.cubism4Model) {
+                console.log('[VRM Init] 当前配置为 ' + cfgType + ' 模式且存在 Live2D 模型，跳过 VRM 默认模型加载');
+                return; // Live2D 模式且有模型，跳过默认加载
             }
 
-            // 如果上面的 if 没拦截住（说明我们要加载 VRM），就会执行这一行，赋予默认模型
+            // 如果配置为 live2d 但没有 Live2D 模型，自动降级到 VRM 默认模型
+            if (!isVRMMode && !window.cubism4Model) {
+                console.log('[VRM Init] 当前配置为 ' + cfgType + ' 模式但无 Live2D 模型，自动降级加载 VRM 默认模型');
+                if (window.lanlan_config) {
+                    window.lanlan_config.model_type = 'live3d';
+                    window.lanlan_config.live3d_sub_type = 'vrm';
+                }
+            }
+
+            // 赋予默认模型
             targetModelPath = '/static/vrm/sister1.0.vrm';
         }
 

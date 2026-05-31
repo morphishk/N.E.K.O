@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .shared_state import get_templates
+from .host_mode_router import _host_mode_ctx
 
 router = APIRouter(tags=["pages"])
 
@@ -112,6 +113,7 @@ async def get_default_index(request: Request):
         **_vrm_defaults_ctx(),
         **_static_assets_ctx(),
         **_react_chat_assets_ctx(),
+        **_host_mode_ctx(),
     })
 
 
@@ -315,4 +317,5 @@ async def get_index(request: Request, lanlan_name: str):
         **_vrm_defaults_ctx(),
         **_static_assets_ctx(),
         **_react_chat_assets_ctx(),
+        **_host_mode_ctx(),
     })

@@ -50,7 +50,6 @@ MMDManager.prototype.setupFloatingButtons = function() {
             buttonsContainer.style.right = '16px';
             buttonsContainer.style.left = '';
             buttonsContainer.style.top = '';
-            buttonsContainer.style.display = 'flex';
         } else {
             buttonsContainer.style.flexDirection = 'column';
             buttonsContainer.style.bottom = '';
@@ -58,6 +57,8 @@ MMDManager.prototype.setupFloatingButtons = function() {
             buttonsContainer.style.left = '';
             buttonsContainer.style.top = '';
         }
+        // 【修复】桌面端和移动端都需要显示按钮
+        buttonsContainer.style.display = 'flex';
     };
     applyResponsiveFloatingLayout();
 

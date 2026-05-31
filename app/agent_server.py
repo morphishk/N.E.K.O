@@ -729,7 +729,7 @@ async def _start_embedded_user_plugin_server() -> None:
 
     config = uvicorn.Config(
         Modules.user_plugin_app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=USER_PLUGIN_SERVER_PORT,
         log_config=None,
         backlog=4096,
@@ -4141,7 +4141,8 @@ async def openfang_llm_proxy(request: Request, path: str):
     """
     # 获取真实 API 地址
     cm = get_config_manager()
-    agent_cfg = cm.get_model_api_config('agent')
+    _char_name = cm.get_character_data()[1] or ''
+    agent_cfg = cm.get_model_api_config('agent', character_name=_char_name)
     real_base_url = (agent_cfg.get("base_url") or "").strip().rstrip("/")
     real_api_key = (agent_cfg.get("api_key") or "").strip()
 
@@ -5511,7 +5512,7 @@ if __name__ == "__main__":
     _behind_proxy = os.environ.get("NEKO_BEHIND_PROXY", "").strip().lower() in ("1", "true", "yes")
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=TOOL_SERVER_PORT,
         proxy_headers=_behind_proxy,
         forwarded_allow_ips="*" if _behind_proxy else None,
